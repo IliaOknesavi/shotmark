@@ -114,6 +114,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         mcp.start()
         if !CGPreflightScreenCaptureAccess() { CGRequestScreenCaptureAccess() }
+        if SystemShortcuts.enabled { offerDisableSystemShortcuts() }
+    }
+
+    /// Значок может спрятаться в переполненной строке меню, поэтому предлагаем отключение сами.
+    func offerDisableSystemShortcuts() {
+        let a = NSAlert()
+        a.messageText = "Отдать ⌘⇧3, ⌘⇧4 и ⌘⇧5 приложению Shotmark?"
+        a.informativeText = "Сейчас эти сочетания перехватывают стандартные скриншоты macOS. Вернуть их можно в меню Shotmark или в Системных настройках → Клавиатура → Сочетания клавиш → Снимки экрана."
+        a.addButton(withTitle: "Отключить системные")
+        a.addButton(withTitle: "Не сейчас")
+        NSApp.activate(ignoringOtherApps: true)
+        if a.runModal() == .alertFirstButtonReturn {
+            SystemShortcuts.set(enabled: false)
+            Hotkeys.reregister()
+        }
+    }
+
+    /// Повторный запуск (Spotlight, Finder) — меню прямо у курсора.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        guard let menu = status.menu else { return false }
+        menuNeedsUpdate(menu)
+        NSApp.activate(ignoringOtherApps: true)
+        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+        return false
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
