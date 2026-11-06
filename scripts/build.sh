@@ -24,7 +24,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSScreenCaptureUsageDescription</key><string>Shotmark снимает экран по сочетаниям и по запросам агентов.</string>
 </dict></plist>
 PLIST
-# shortcut: ad-hoc подпись меняется при каждой сборке, и macOS просит заново разрешить запись экрана;
-# стабильная подпись — самоподписанный сертификат для подписи кода (CODESIGN_ID=имя)
-codesign --force --sign "${CODESIGN_ID:--}" --identifier com.hatiko.shotmark "$APP"
+# Самоподписанный сертификат «Shotmark Dev» даёт стабильную подпись: разрешение на запись экрана
+# переживает пересборки. Без него — ad-hoc, и macOS спрашивает разрешение после каждой сборки.
+ID="${CODESIGN_ID:-Shotmark Dev}"
+security find-identity -p codesigning | grep -q "\"$ID\"" || ID="-"
+codesign --force --sign "$ID" --identifier com.hatiko.shotmark "$APP"
 echo "$APP"
