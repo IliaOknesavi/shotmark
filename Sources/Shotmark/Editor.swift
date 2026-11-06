@@ -22,7 +22,7 @@ final class Editor: NSObject, NSWindowDelegate {
     var waiters: [() -> Void] = []
 
     static let tools: [(id: String, symbol: String, tip: String)] = [
-        ("crop", "crop", "Область (C): тяни — область, клик — окно"),
+        ("crop", "crop", "Область (C): отпусти — снимок, клик — окно, правая кнопка — сброс"),
         ("arrow", "arrow.up.right", "Стрелка (A)"), ("line", "line.diagonal", "Линия (L)"),
         ("rect", "rectangle", "Прямоугольник (R)"), ("ellipse", "circle", "Эллипс (E)"),
         ("pen", "pencil", "Перо (P)"), ("marker", "highlighter", "Маркер (M)"),
@@ -147,7 +147,6 @@ final class Editor: NSObject, NSWindowDelegate {
             }
             let bar = NSStackView(views: [toolPicker, colorWell, widthSlider, fillBox, undoB, redoB,
                                           button("macwindow", "Открыть в редакторе (⌘E)", #selector(toEditor), "e"),
-                                          button("square.and.arrow.down", "Сохранить на рабочий стол (⌘S)", #selector(save), "s"),
                                           button("doc.on.doc", "Копировать (⌘C)", #selector(copyImage), "c"),
                                           done, cancel])
             bar.spacing = 8
@@ -245,14 +244,7 @@ final class Editor: NSObject, NSWindowDelegate {
 
     @objc func save() {
         canvas.commitText()
-        if isOverlay {
-            let f = DateFormatter()
-            f.dateFormat = "yyyy-MM-dd 'в' HH.mm.ss"
-            let url = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent("Снимок Shotmark \(f.string(from: Date())).png")
-            try? encode(Render.image(shot), as: .png).write(to: url)
-            return finishOverlay()
-        }
+        if isOverlay { return finishOverlay() }
         let p = NSSavePanel()
         p.allowedContentTypes = [.png, .jpeg]
         p.nameFieldStringValue = "Shotmark \(shot.id).png"
@@ -273,10 +265,7 @@ final class Editor: NSObject, NSWindowDelegate {
     /// Выделения нет — берётся весь монитор.
     private func finishOverlay(copy: Bool = true) {
         Store.shared.persist(shot)
-        if copy {
-            copyToClipboard(Render.image(shot))
-            playShutter()
-        }
+        if copy { deliverCapture(Render.image(shot)) }
         Editor.closeOverlays(result: shot)
     }
 
@@ -301,6 +290,32 @@ final class Editor: NSObject, NSWindowDelegate {
         if Editor.open.isEmpty { NSApp.setActivationPolicy(.accessory) }
         waiters.forEach { $0() }
         waiters.removeAll()
+    }
+}
+
+/// Снимок человека: в буфер обмена и в ~/Pictures/Screenshots/ГГГГ-ММ/, со звуком затвора.
+@discardableResult
+func deliverCapture(_ img: CGImage) -> URL? {
+    copyToClipboard(img)
+    playShutter()
+    let now = Date()
+    let f = DateFormatter()
+    f.dateFormat = "yyyy-MM"
+    let dir = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("Screenshots").appendingPathComponent(f.string(from: now))
+    f.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+    var url = dir.appendingPathComponent("Shotmark_\(f.string(from: now)).png")
+    var n = 2
+    while FileManager.default.fileExists(atPath: url.path) {
+        url = dir.appendingPathComponent("Shotmark_\(f.string(from: now))_\(n).png"); n += 1
+    }
+    do {
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try encode(img, as: .png).write(to: url)
+        return url
+    } catch {
+        NSLog("Shotmark: не удалось сохранить \(url.path): \(error)")
+        return nil
     }
 }
 
@@ -401,6 +416,18 @@ final class Canvas: NSView, NSTextFieldDelegate {
         ctx.restoreGState()
     }
 
+    /// Правая кнопка: во время протягивания сбрасывает фигуру или область, иначе закрывает режим поверх экрана.
+    override func rightMouseDown(with e: NSEvent) {
+        if draft != nil {
+            draft = nil
+            needsDisplay = true
+        } else if fullBleed {
+            editor?.escape()
+        } else {
+            super.rightMouseDown(with: e)
+        }
+    }
+
     override func mouseMoved(with e: NSEvent) {
         guard fullBleed else { return }
         let p = convert(e.locationInWindow, from: nil)
@@ -453,8 +480,13 @@ final class Canvas: NSView, NSTextFieldDelegate {
         switch d.type {
         case "crop":
             let r = Render.rect(d)
+            if fullBleed {
+                // как в ShareX: отпустил — снимок; клик — окно под курсором, мимо окон — весь монитор
+                shot.apply { $0.crop = moved ? r : hover }
+                editor?.doneTapped()
+                return
+            }
             if moved { shot.apply { $0.crop = r } }
-            else if fullBleed, let h = hover { shot.apply { $0.crop = h } }
             else if shot.state.crop != nil { shot.apply { $0.crop = nil } }
         case "callout":
             var a = d

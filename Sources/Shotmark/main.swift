@@ -24,8 +24,7 @@ enum Actions {
         Task {
             do {
                 let sh = Store.shared.add(try await Capture.screen(index: nil), source: "screen")
-                copyToClipboard(sh.base)
-                playShutter()
+                deliverCapture(sh.base)
             } catch { NSLog("Shotmark: \(error)"); Permissions.explain() }
         }
     }
