@@ -14,6 +14,7 @@ enum Tools {
     private static let shotID: [String: Any] = ["type": "string", "description": "id снимка; по умолчанию последний"]
     private static let retImg: [String: Any] = ["type": "boolean", "description": "вернуть картинку в ответе (по умолчанию true)"]
     private static let maxSize: [String: Any] = ["type": "integer", "description": "длинная сторона картинки в ответе, по умолчанию 1568"]
+    private static let incSelf: [String: Any] = ["type": "boolean", "description": "включить окна Shotmark (редактор, уровни снимка); по умолчанию false"]
     private static func num(_ d: String) -> [String: Any] { ["type": "number", "description": d] }
     private static func obj(_ props: [String: Any], _ req: [String] = []) -> [String: Any] {
         ["type": "object", "properties": props, "required": req]
@@ -39,15 +40,15 @@ enum Tools {
         [
             ["name": "list_displays", "description": "Мониторы: номер, рамка в точках, масштаб.", "inputSchema": obj([:])],
             ["name": "list_windows", "description": "Видимые окна: id, приложение, заголовок, рамка в точках.",
-             "inputSchema": obj(["app": ["type": "string", "description": "фильтр по имени приложения"]])],
+             "inputSchema": obj(["app": ["type": "string", "description": "фильтр по имени приложения"], "include_self": incSelf])],
             ["name": "capture_screen", "description": "Снять весь монитор (по умолчанию тот, где курсор).",
-             "inputSchema": obj(["display": ["type": "integer", "description": "номер из list_displays"], "return_image": retImg, "max_size": maxSize])],
+             "inputSchema": obj(["display": ["type": "integer", "description": "номер из list_displays"], "include_self": incSelf, "return_image": retImg, "max_size": maxSize])],
             ["name": "capture_area", "description": "Снять прямоугольник экрана в точках.",
              "inputSchema": obj(["x": num("слева"), "y": num("сверху"), "width": num("ширина"), "height": num("высота"),
                                  "return_image": retImg, "max_size": maxSize], ["x", "y", "width", "height"])],
             ["name": "capture_window", "description": "Снять окно по id или по части заголовка / имени приложения.",
              "inputSchema": obj(["window_id": ["type": "integer"], "title": ["type": "string"], "app": ["type": "string"],
-                                 "return_image": retImg, "max_size": maxSize])],
+                                 "include_self": incSelf, "return_image": retImg, "max_size": maxSize])],
             ["name": "capture_app", "description": "Снять все видимые окна приложения одним кадром.",
              "inputSchema": obj(["app": ["type": "string", "description": "имя или bundle id"], "return_image": retImg, "max_size": maxSize], ["app"])],
             ["name": "ask_user_capture", "description": "Заморозить экран и попросить человека разметить его и выделить область (как ⌘⇧4). Ждёт, пока он нажмёт «Копировать»; возвращает итоговую картинку и его аннотации.",
@@ -100,7 +101,7 @@ enum Tools {
             return [text(rows.joined(separator: "\n"))]
 
         case "list_windows":
-            var ws = try await Capture.windows()
+            var ws = try await Capture.windows(includeSelf: b("include_self", false))
             if let app = s("app")?.lowercased() { ws = ws.filter { ($0.owningApplication?.applicationName.lowercased() ?? "").contains(app) } }
             let rows: [[String: Any]] = ws.map { w in
                 ["id": w.windowID, "app": w.owningApplication?.applicationName ?? "", "title": w.title ?? "",
@@ -109,7 +110,7 @@ enum Tools {
             return [text(String(data: try JSONSerialization.data(withJSONObject: rows, options: [.prettyPrinted]), encoding: .utf8)!)]
 
         case "capture_screen":
-            return result(Store.shared.add(try await Capture.screen(index: i("display")), source: "screen"), a, maxSide)
+            return result(Store.shared.add(try await Capture.screen(index: i("display"), includeSelf: b("include_self", false)), source: "screen"), a, maxSide)
 
         case "capture_area":
             guard let x = d("x"), let y = d("y"), let w = d("width"), let h = d("height") else { throw ShotError("нужны x, y, width, height") }
@@ -121,7 +122,7 @@ enum Tools {
                 let q = (s("title") ?? "").lowercased(), app = (s("app") ?? "").lowercased()
                 guard !q.isEmpty || !app.isEmpty else { throw ShotError("нужен window_id, title или app") }
                 // из подходящих — самое большое окно (у приложения бывают служебные полоски)
-                id = try await Capture.windows().filter { w in
+                id = try await Capture.windows(includeSelf: b("include_self", false)).filter { w in
                     (q.isEmpty || (w.title ?? "").lowercased().contains(q)) &&
                     (app.isEmpty || (w.owningApplication?.applicationName.lowercased() ?? "").contains(app))
                 }.max { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }?.windowID

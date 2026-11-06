@@ -1,5 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
+import ServiceManagement
 
 @MainActor
 enum Permissions {
@@ -114,6 +115,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         mcp.start()
         if !CGPreflightScreenCaptureAccess() { CGRequestScreenCaptureAccess() }
         if SystemShortcuts.enabled { offerDisableSystemShortcuts() }
+        // автозапуск включается один раз при первом запуске; дальше — как решил человек в меню
+        if !UserDefaults.standard.bool(forKey: "loginItemConfigured") {
+            UserDefaults.standard.set(true, forKey: "loginItemConfigured")
+            setLaunchAtLogin(true)
+        }
+    }
+
+    func setLaunchAtLogin(_ on: Bool) {
+        do {
+            if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+        } catch {
+            NSLog("Shotmark: автозапуск \(on ? "включить" : "выключить") не удалось: \(error)")
+        }
+        NSLog("Shotmark: автозапуск \(SMAppService.mainApp.status.rawValue)")
     }
 
     /// Значок может спрятаться в переполненной строке меню, поэтому предлагаем отключение сами.
@@ -170,6 +185,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             item("Вернуть системные сочетания скриншотов") { SystemShortcuts.set(enabled: true) }
         }
+        let login = SMAppService.mainApp.status
+        item("Запускать при входе") { [weak self] in self?.setLaunchAtLogin(login != .enabled) }
+        menu.items.last?.state = login == .enabled ? .on : .off
         item("Скопировать команду подключения MCP") { [mcp] in
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(mcp.addCommand, forType: .string)

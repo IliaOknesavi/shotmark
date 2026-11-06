@@ -104,7 +104,7 @@ enum Capture {
         return out
     }
 
-    static func windows() async throws -> [SCWindow] {
-        try await content().windows.filter { $0.windowLayer == 0 && $0.isOnScreen && $0.frame.width > 1 && $0.frame.height > 1 && $0.owningApplication?.processID != getpid() }
+    static func windows(includeSelf: Bool = false) async throws -> [SCWindow] {
+        try await content().windows.filter { $0.windowLayer == 0 && $0.isOnScreen && $0.frame.width > 1 && $0.frame.height > 1 && (includeSelf || $0.owningApplication?.processID != getpid()) }
     }
 }
