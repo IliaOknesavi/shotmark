@@ -5,9 +5,10 @@ import Carbon.HIToolbox
 @MainActor
 enum Hotkeys {
     private static var handlers: [UInt32: () -> Void] = [:]
+    private static var regs: [(key: Int, mods: Int, id: UInt32, ref: EventHotKeyRef?)] = []
     private static var installed = false
 
-    /// false — сочетание уже занято (например, системой).
+    /// false — сочетание уже занято другим приложением.
     @discardableResult
     static func register(key: Int, mods: Int, _ fn: @escaping () -> Void) -> Bool {
         if !installed {
@@ -23,11 +24,24 @@ enum Hotkeys {
             }, 1, &spec, nil, nil)
         }
         let id = UInt32(handlers.count + 1)
+        handlers[id] = fn
+        let ref = make(key, mods, id)
+        regs.append((key, mods, id, ref))
+        return ref != nil
+    }
+
+    /// Перерегистрировать всё, например после того как macOS отпустила свои сочетания.
+    static func reregister() {
+        regs = regs.map { r in
+            if let ref = r.ref { UnregisterEventHotKey(ref) }
+            return (r.key, r.mods, r.id, make(r.key, r.mods, r.id))
+        }
+    }
+
+    private static func make(_ key: Int, _ mods: Int, _ id: UInt32) -> EventHotKeyRef? {
         var ref: EventHotKeyRef?
         let st = RegisterEventHotKey(UInt32(key), UInt32(mods), EventHotKeyID(signature: OSType(0x53484D4B), id: id),
                                      GetApplicationEventTarget(), 0, &ref)
-        guard st == noErr else { return false }
-        handlers[id] = fn
-        return true
+        return st == noErr ? ref : nil
     }
 }

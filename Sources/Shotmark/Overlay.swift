@@ -25,11 +25,7 @@ final class Overlay {
     }
 
     private func run(hint: String?) async -> Selection? {
-        let content = try? await Capture.content()
-        var frozen: [CGDirectDisplayID: CGImage] = [:]
-        if let content {
-            for d in content.displays { frozen[d.displayID] = try? await Capture.display(d, in: content) }
-        }
+        let frozen = await Capture.freezeAll()
         guard !frozen.isEmpty else {
             NSSound.beep()
             Permissions.explain()

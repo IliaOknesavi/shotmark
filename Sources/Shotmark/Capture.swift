@@ -84,7 +84,7 @@ enum Capture {
         let q = query.lowercased()
         guard let app = c.applications.first(where: { $0.applicationName.lowercased() == q || $0.bundleIdentifier.lowercased() == q })
                 ?? c.applications.first(where: { $0.applicationName.lowercased().contains(q) })
-        else { throw ShotError("приложение «\(query)» не найдено среди запущенных") }
+        else { throw ShotError("у приложения «\(query)» нет окон на текущем рабочем столе (или оно не запущено)") }
         let wins = c.windows.filter { $0.owningApplication?.processID == app.processID && $0.windowLayer == 0 && $0.isOnScreen && $0.frame.width > 1 }
         guard let first = wins.first else { throw ShotError("у «\(app.applicationName)» нет видимых окон") }
         let union = wins.dropFirst().reduce(first.frame) { $0.union($1.frame) }
@@ -93,6 +93,14 @@ enum Capture {
         let local = union.intersection(d.frame).offsetBy(dx: -d.frame.minX, dy: -d.frame.minY)
         let filter = SCContentFilter(display: d, including: [app], exceptingWindows: [])
         return try await shoot(filter, size: local.size, scale: scale(d.displayID), source: local)
+    }
+
+    /// Кадр каждого монитора (без окон Shotmark) — основа для выделения на замороженном экране.
+    static func freezeAll() async -> [CGDirectDisplayID: CGImage] {
+        guard let c = try? await content() else { return [:] }
+        var out: [CGDirectDisplayID: CGImage] = [:]
+        for d in c.displays { out[d.displayID] = try? await display(d, in: c) }
+        return out
     }
 
     static func windows() async throws -> [SCWindow] {

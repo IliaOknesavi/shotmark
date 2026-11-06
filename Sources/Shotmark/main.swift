@@ -19,31 +19,20 @@ enum Permissions {
 /// Действия по сочетаниям и из меню.
 @MainActor
 enum Actions {
-    static func shot(from sel: Selection) async throws -> Shot {
-        switch sel {
-        case .area(let img, _): return Store.shared.add(img, source: "area")
-        case .window(let id, _): return Store.shared.add(try await Capture.window(id), source: "window \(id)")
-        }
-    }
-
-    /// После ручного снимка: в буфер и в редактор.
-    static func deliver(_ sh: Shot) {
-        copyToClipboard(sh.base)
-        Editor.show(sh)
-    }
-
+    /// ⌘⇧3: весь монитор сразу в буфер и в историю.
     static func fullScreen() {
         Task {
-            do { deliver(Store.shared.add(try await Capture.screen(index: nil), source: "screen")) }
-            catch { NSLog("Shotmark: \(error)"); Permissions.explain() }
+            do {
+                let sh = Store.shared.add(try await Capture.screen(index: nil), source: "screen")
+                copyToClipboard(sh.base)
+                playShutter()
+            } catch { NSLog("Shotmark: \(error)"); Permissions.explain() }
         }
     }
 
+    /// ⌘⇧4: экран замирает, разметка и выбор области прямо на нём.
     static func select() {
-        Task {
-            guard let sel = await Overlay.select() else { return }
-            do { deliver(try await shot(from: sel)) } catch { NSLog("Shotmark: \(error)") }
-        }
+        Task { _ = await Editor.captureInPlace() }
     }
 
     static func toggleRecording() {
@@ -74,6 +63,34 @@ enum Actions {
     }
 }
 
+/// Системные ⌘⇧3/4/5 (и варианты с ⌃) в com.apple.symbolichotkeys. Меняются только по нажатию пункта меню.
+enum SystemShortcuts {
+    private static let domain = "com.apple.symbolichotkeys" as CFString
+    private static let key = "AppleSymbolicHotKeys" as CFString
+    private static let ids: [(String, [Int])] = [("28", [51, 20, 1179648]), ("29", [51, 20, 1441792]),
+                                                 ("30", [52, 21, 1179648]), ("31", [52, 21, 1441792]), ("184", [53, 23, 1179648])]
+
+    static var enabled: Bool {
+        let all = CFPreferencesCopyAppValue(key, domain) as? [String: Any] ?? [:]
+        return ids.contains { id, _ in ((all[id] as? [String: Any])?["enabled"] as? Bool) ?? true }
+    }
+
+    static func set(enabled: Bool) {
+        var all = CFPreferencesCopyAppValue(key, domain) as? [String: Any] ?? [:]
+        for (id, params) in ids {
+            all[id] = ["enabled": enabled, "value": ["parameters": params, "type": "standard"]] as [String: Any]
+        }
+        CFPreferencesSetAppValue(key, all as CFDictionary, domain)
+        CFPreferencesAppSynchronize(domain)
+        // применяет сочетания без выхода из системы
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/System/Library/PrivateFrameworks/SystemAdministration.framework/Resources/activateSettings")
+        p.arguments = ["-u"]
+        try? p.run()
+        p.waitUntilExit()
+    }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let status = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -90,6 +107,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                 (kVK_ANSI_5, "⌘⇧5", Actions.toggleRecording)] {
             if !Hotkeys.register(key: key, mods: cmdShift, fn) { busy.append(name) }
         }
+        if SystemShortcuts.enabled { busy = ["⌘⇧3", "⌘⇧4", "⌘⇧5"] }
         Recorder.shared.onChange = { [weak self] in
             self?.status.button?.image = NSImage(systemSymbolName: Recorder.shared.isRecording ? "record.circle.fill" : "camera.viewfinder",
                                                  accessibilityDescription: "Shotmark")
@@ -115,10 +133,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         item("Последний снимок") { if let s = Store.shared.get(nil) { Editor.show(s) } }
         item("Папка снимков") { NSWorkspace.shared.open(Store.shared.shotsDir) }
         menu.addItem(.separator())
+        busy = SystemShortcuts.enabled ? ["⌘⇧3", "⌘⇧4", "⌘⇧5"] : []
         if !busy.isEmpty {
-            let i = NSMenuItem(title: "Заняты системой: \(busy.joined(separator: ", "))", action: nil, keyEquivalent: "")
+            let i = NSMenuItem(title: "Сейчас их перехватывает macOS: \(busy.joined(separator: ", "))", action: nil, keyEquivalent: "")
             i.isEnabled = false
             menu.addItem(i)
+        }
+        if SystemShortcuts.enabled {
+            item("Отключить системные сочетания скриншотов") {
+                SystemShortcuts.set(enabled: false)
+                Hotkeys.reregister()
+            }
+        } else {
+            item("Вернуть системные сочетания скриншотов") { SystemShortcuts.set(enabled: true) }
         }
         item("Скопировать команду подключения MCP") { [mcp] in
             NSPasteboard.general.clearContents()

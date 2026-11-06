@@ -40,6 +40,8 @@ final class Shot {
     var undoStack: [DocState] = []
     var redoStack: [DocState] = []
     var observers: [ObjectIdentifier: () -> Void] = [:]
+    /// false — черновик с замороженного экрана, в историю ещё не записан
+    var persisted = true
 
     init(id: String, created: Date, source: String, base: CGImage) {
         self.id = id; self.created = created; self.source = source; self.base = base
@@ -66,7 +68,7 @@ final class Shot {
     }
 
     private func changed() {
-        Store.shared.saveMeta(self)
+        if persisted { Store.shared.saveMeta(self) }
         observers.values.forEach { $0() }
     }
 }
@@ -89,15 +91,32 @@ final class Store {
     private func metaURL(_ id: String) -> URL { shotsDir.appendingPathComponent("\(id).json") }
 
     func add(_ image: CGImage, source: String) -> Shot {
+        let shot = temp(image, source: source)
+        persist(shot)
+        return shot
+    }
+
+    /// Снимок только в памяти: в историю попадёт после persist.
+    func temp(_ image: CGImage, source: String) -> Shot {
         let f = DateFormatter()
         f.dateFormat = "yyyyMMdd-HHmmss-SSS"
         var id = f.string(from: Date())
         while cache[id] != nil || FileManager.default.fileExists(atPath: metaURL(id).path) { id += "x" }
         let shot = Shot(id: id, created: Date(), source: source, base: image)
-        try? encode(image, as: .png).write(to: imageURL(id))
+        shot.persisted = false
         cache[id] = shot
-        saveMeta(shot)
         return shot
+    }
+
+    func persist(_ shot: Shot) {
+        guard !shot.persisted else { return }
+        try? encode(shot.base, as: .png).write(to: imageURL(shot.id))
+        shot.persisted = true
+        saveMeta(shot)
+    }
+
+    func discard(_ shot: Shot) {
+        if !shot.persisted { cache[shot.id] = nil }
     }
 
     func saveMeta(_ s: Shot) {

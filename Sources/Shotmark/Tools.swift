@@ -50,10 +50,8 @@ enum Tools {
                                  "return_image": retImg, "max_size": maxSize])],
             ["name": "capture_app", "description": "Снять все видимые окна приложения одним кадром.",
              "inputSchema": obj(["app": ["type": "string", "description": "имя или bundle id"], "return_image": retImg, "max_size": maxSize], ["app"])],
-            ["name": "ask_user_capture", "description": "Попросить человека выделить область или окно; затем открыть редактор и дождаться, пока он разметит и закроет его. Возвращает итоговую картинку и его аннотации.",
-             "inputSchema": obj(["prompt": ["type": "string", "description": "подсказка на экране выделения"],
-                                 "wait_for_edit": ["type": "boolean", "description": "ждать закрытия редактора (по умолчанию true)"],
-                                 "max_size": maxSize])],
+            ["name": "ask_user_capture", "description": "Заморозить экран и попросить человека разметить его и выделить область (как ⌘⇧4). Ждёт, пока он нажмёт «Копировать»; возвращает итоговую картинку и его аннотации.",
+             "inputSchema": obj(["prompt": ["type": "string", "description": "подсказка на панели инструментов"], "max_size": maxSize])],
             ["name": "open_image", "description": "Загрузить картинку из файла как новый снимок (для разметки).",
              "inputSchema": obj(["path": ["type": "string"], "open_editor": ["type": "boolean"]], ["path"])],
             ["name": "open_editor", "description": "Открыть снимок в редакторе. wait=true — дождаться закрытия и вернуть результат.",
@@ -122,10 +120,11 @@ enum Tools {
             if id == nil {
                 let q = (s("title") ?? "").lowercased(), app = (s("app") ?? "").lowercased()
                 guard !q.isEmpty || !app.isEmpty else { throw ShotError("нужен window_id, title или app") }
-                id = try await Capture.windows().first { w in
+                // из подходящих — самое большое окно (у приложения бывают служебные полоски)
+                id = try await Capture.windows().filter { w in
                     (q.isEmpty || (w.title ?? "").lowercased().contains(q)) &&
                     (app.isEmpty || (w.owningApplication?.applicationName.lowercased() ?? "").contains(app))
-                }?.windowID
+                }.max { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }?.windowID
             }
             guard let id else { throw ShotError("окно не найдено; посмотрите list_windows") }
             return result(Store.shared.add(try await Capture.window(id), source: "window \(id)"), a, maxSide)
@@ -135,9 +134,7 @@ enum Tools {
             return result(Store.shared.add(try await Capture.app(app), source: "app \(app)"), a, maxSide)
 
         case "ask_user_capture":
-            guard let sel = await Overlay.select(hint: s("prompt")) else { throw ShotError("человек отменил выделение") }
-            let sh = try await Actions.shot(from: sel)
-            if b("wait_for_edit", true) { await Editor.show(sh).waitClose() }
+            guard let sh = await Editor.captureInPlace(hint: s("prompt")) else { throw ShotError("человек отменил снимок") }
             return result(sh, a, maxSide, withAnnotations: true)
 
         case "open_image":
