@@ -22,6 +22,7 @@ final class Editor: NSObject, NSWindowDelegate {
     var waiters: [() -> Void] = []
 
     static let tools: [(id: String, symbol: String, tip: String)] = [
+        ("select", "cursorarrow", "Выбор (V): двигать и менять размер; правая кнопка по фигуре — свойства"),
         ("crop", "crop", "Область (C): отпусти — снимок, клик — окно, правая кнопка — сброс"),
         ("arrow", "arrow.up.right", "Стрелка (A)"), ("line", "line.diagonal", "Линия (L)"),
         ("rect", "rectangle", "Прямоугольник (R)"), ("ellipse", "circle", "Эллипс (E)"),
@@ -31,7 +32,7 @@ final class Editor: NSObject, NSWindowDelegate {
         ("pixelate", "square.grid.3x3", "Пикселизация (X)"), ("loupe", "plus.magnifyingglass", "Лупа (Z)"),
     ]
     static let keys: [Character: String] = ["a": "arrow", "l": "line", "r": "rect", "e": "ellipse", "p": "pen", "m": "marker",
-                                            "t": "text", "o": "callout", "n": "step", "b": "blur", "x": "pixelate", "z": "loupe", "c": "crop"]
+                                            "t": "text", "o": "callout", "n": "step", "b": "blur", "x": "pixelate", "z": "loupe", "c": "crop", "v": "select"]
 
     let toolPicker = NSSegmentedControl()
     let colorWell = NSColorWell(style: .minimal)
@@ -87,7 +88,8 @@ final class Editor: NSObject, NSWindowDelegate {
         if let screen {
             window = KeyableWindow(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false)
             window.setFrame(screen.frame, display: false)
-            window.level = .screenSaver
+            // выше Dock и строки меню, но ниже контекстных меню (иначе меню правой кнопки окажется под снимком)
+            window.level = NSWindow.Level(rawValue: NSWindow.Level.popUpMenu.rawValue - 1)
             window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             window.acceptsMouseMovedEvents = true
             canvas.fullBleed = true
@@ -113,7 +115,7 @@ final class Editor: NSObject, NSWindowDelegate {
             toolPicker.setToolTip(t.tip, forSegment: i)
             toolPicker.setWidth(30, forSegment: i)
         }
-        toolPicker.selectedSegment = isOverlay ? 0 : 1
+        toolPicker.selectedSegment = Editor.tools.firstIndex { $0.id == (isOverlay ? "crop" : "arrow") }!
         toolPicker.target = self; toolPicker.action = #selector(toolChanged)
         colorWell.color = .systemRed
         colorWell.target = self; colorWell.action = #selector(styleChanged)
@@ -216,7 +218,11 @@ final class Editor: NSObject, NSWindowDelegate {
             fill: fillBox.state == .on ? true : nil)
     }
 
-    @objc func toolChanged() { canvas.cancelText(); window.makeFirstResponder(canvas); canvas.needsDisplay = true }
+    @objc func toolChanged() {
+        canvas.cancelText()
+        canvas.toolChanged()
+        window.makeFirstResponder(canvas)
+    }
     @objc func styleChanged() {}
     @objc func undo() { canvas.cancelText(); shot.undo() }
     @objc func redo() { canvas.cancelText(); shot.redo() }
@@ -337,6 +343,11 @@ final class Canvas: NSView, NSTextFieldDelegate {
     var screenTL = CGRect.zero
     var winRects: [(CGWindowID, CGRect)] = []
     private var hover: CGRect?       // окно под курсором, в пикселях снимка
+    private var pendingIndex: Int?   // правим текст существующей аннотации
+    // инструмент «Выбор»
+    private var selected: Int?
+    private var drag: (handle: Int?, start: CGPoint, orig: Ann)?
+    private var live: Ann?
 
     var isEditingText: Bool { field != nil }
 
@@ -351,9 +362,25 @@ final class Canvas: NSView, NSTextFieldDelegate {
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-    override func resetCursorRects() { addCursorRect(bounds, cursor: .crosshair) }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: editor?.tool == "select" ? .arrow : .crosshair) }
 
-    func refresh() { cached = nil; needsDisplay = true }
+    func refresh() {
+        if let i = selected, i >= shot.state.anns.count { selected = nil }
+        cached = nil
+        needsDisplay = true
+    }
+
+    func toolChanged() {
+        if editor?.tool != "select" { selected = nil }
+        window?.invalidateCursorRects(for: self)
+        needsDisplay = true
+    }
+
+    private var tolerance: CGFloat { 6 / fit.scale }
+
+    private func hit(_ p: CGPoint) -> Int? {
+        shot.state.anns.indices.reversed().first { Render.bounds(shot.state.anns[$0]).insetBy(dx: -tolerance, dy: -tolerance).contains(p) }
+    }
 
     private var fit: (scale: CGFloat, origin: CGPoint) {
         let s = shot.size
@@ -379,7 +406,7 @@ final class Canvas: NSView, NSTextFieldDelegate {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
         NSColor.windowBackgroundColor.blended(withFraction: 0.3, of: .black)?.setFill()
         bounds.fill()
-        if cached == nil { cached = Render.image(shot, crop: false) }
+        if cached == nil { cached = Render.image(shot, crop: false, skip: drag != nil ? selected : nil) }
         let f = fit
         let imgRect = CGRect(origin: f.origin, size: CGSize(width: shot.size.width * f.scale, height: shot.size.height * f.scale))
         ctx.interpolationQuality = .high
@@ -403,6 +430,25 @@ final class Canvas: NSView, NSTextFieldDelegate {
                                                         .foregroundColor: NSColor.white, .backgroundColor: NSColor.black.withAlphaComponent(0.7)]
             text.draw(at: CGPoint(x: r.minX, y: max(0, r.minY - 18 / f.scale)), withAttributes: attrs)
         }
+        if let l = live { Render.draw(l, in: ctx, base: shot.base) }
+        if let i = selected, i < shot.state.anns.count {
+            let a = live ?? shot.state.anns[i]
+            ctx.setStrokeColor(NSColor.systemBlue.cgColor)
+            ctx.setLineWidth(1.5 / f.scale)
+            if !a.isSegment {
+                ctx.saveGState()
+                ctx.setLineDash(phase: 0, lengths: [5 / f.scale, 3 / f.scale])
+                ctx.stroke(Render.bounds(a))
+                ctx.restoreGState()
+            }
+            let hs = 8 / f.scale
+            for h in a.handles() {
+                let r = CGRect(x: h.x - hs / 2, y: h.y - hs / 2, width: hs, height: hs)
+                ctx.setFillColor(NSColor.white.cgColor)
+                ctx.fill(r)
+                ctx.stroke(r)
+            }
+        }
         if let d = draft {
             if ["blur", "pixelate", "crop"].contains(d.type) {
                 ctx.setStrokeColor(NSColor.systemBlue.cgColor)
@@ -421,6 +467,11 @@ final class Canvas: NSView, NSTextFieldDelegate {
         if draft != nil {
             draft = nil
             needsDisplay = true
+        } else if let i = hit(toImage(e)) {
+            commitText()
+            selected = i
+            needsDisplay = true
+            NSMenu.popUpContextMenu(menu(for: i), with: e, for: self)
         } else if fullBleed {
             editor?.escape()
         } else {
@@ -446,6 +497,25 @@ final class Canvas: NSView, NSTextFieldDelegate {
         commitText()
         guard let ed = editor else { return }
         let p = toImage(e)
+        if ed.tool == "select" {
+            if let i = selected, i < shot.state.anns.count,
+               let k = shot.state.anns[i].handles().firstIndex(where: { hypot($0.x - p.x, $0.y - p.y) <= tolerance * 1.5 }) {
+                drag = (k, p, shot.state.anns[i])
+            } else if let i = hit(p) {
+                selected = i
+                drag = (nil, p, shot.state.anns[i])
+            } else {
+                selected = nil
+            }
+            if e.clickCount == 2, let i = selected, ["text", "callout"].contains(shot.state.anns[i].type) {
+                drag = nil
+                editText(i)
+                return
+            }
+            cached = nil
+            needsDisplay = true
+            return
+        }
         switch ed.tool {
         case "step":
             var a = ed.style("step", [p]); a.number = shot.nextStep
@@ -457,7 +527,17 @@ final class Canvas: NSView, NSTextFieldDelegate {
         }
     }
 
-    override func mouseDragged(with e: NSEvent) {
+    override func mouseDragged(with e: NSEvent) { track(e) }
+
+    /// Обновляет тянущуюся фигуру по позиции мыши; зовётся и при отпускании, чтобы конечная точка была точной.
+    private func track(_ e: NSEvent) {
+        if let dr = drag {
+            let p = toImage(e)
+            live = dr.handle.map { dr.orig.resized(handle: $0, to: p) }
+                ?? dr.orig.translated(by: CGVector(dx: p.x - dr.start.x, dy: p.y - dr.start.y))
+            needsDisplay = true
+            return
+        }
         guard var d = draft else { return }
         var p = toImage(e)
         if e.modifierFlags.contains(.shift), d.points.count == 2, ["line", "arrow"].contains(d.type) {
@@ -474,6 +554,14 @@ final class Canvas: NSView, NSTextFieldDelegate {
     }
 
     override func mouseUp(with e: NSEvent) {
+        if drag != nil || draft != nil { track(e) }
+        if drag != nil {
+            if let l = live, let i = selected, l != drag?.orig { shot.apply { $0.anns[i] = l } }
+            drag = nil
+            live = nil
+            refresh()
+            return
+        }
         guard let d = draft else { return }
         draft = nil
         let moved = d.points.count > 2 || (d.points.count == 2 && hypot(d.points[1].x - d.points[0].x, d.points[1].y - d.points[0].y) > 2)
@@ -508,6 +596,12 @@ final class Canvas: NSView, NSTextFieldDelegate {
             editor?.select(tool: t)
         } else if e.keyCode == 36 || e.keyCode == 76, fullBleed || e.modifierFlags.contains(.command) {
             editor?.doneTapped()
+        } else if e.keyCode == 51 || e.keyCode == 117, let i = selected {
+            selected = nil
+            shot.apply { $0.anns.remove(at: i) }
+        } else if e.keyCode == 53, selected != nil {
+            selected = nil
+            needsDisplay = true
         } else if e.keyCode == 53 {
             editor?.escape()
         } else {
@@ -515,12 +609,100 @@ final class Canvas: NSView, NSTextFieldDelegate {
         }
     }
 
+    // MARK: свойства по правой кнопке
+
+    private static let palette: [(String, String)] = [
+        ("Красный", "#FF3B30"), ("Оранжевый", "#FF9500"), ("Жёлтый", "#FFCC00"), ("Зелёный", "#34C759"),
+        ("Синий", "#007AFF"), ("Фиолетовый", "#AF52DE"), ("Белый", "#FFFFFF"), ("Чёрный", "#000000"),
+    ]
+
+    private func menu(for i: Int) -> NSMenu {
+        let a = shot.state.anns[i]
+        let m = NSMenu()
+        m.autoenablesItems = false
+        func item(_ title: String, checked: Bool = false, image: NSImage? = nil, _ f: @escaping () -> Void) -> NSMenuItem {
+            let it = NSMenuItem(title: title, action: #selector(runItem(_:)), keyEquivalent: "")
+            it.target = self
+            it.representedObject = f
+            it.state = checked ? .on : .off
+            it.image = image
+            return it
+        }
+        func change(_ f: @escaping (inout Ann) -> Void) -> () -> Void {
+            { [weak self] in
+                guard let self, i < self.shot.state.anns.count else { return }
+                self.shot.apply { f(&$0.anns[i]) }
+            }
+        }
+        func sub(_ title: String, _ items: [NSMenuItem]) {
+            let s = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            s.submenu = NSMenu()
+            items.forEach { s.submenu!.addItem($0) }
+            m.addItem(s)
+        }
+        let t = a.type
+        if t == "text" || t == "callout" { m.addItem(item("Изменить текст…") { [weak self] in self?.editText(i) }) }
+        if t != "blur" && t != "pixelate" {
+            sub("Цвет", Canvas.palette.map { name, hx in
+                item(name, checked: (a.color ?? "#FF3B30").uppercased().hasPrefix(hx), image: swatch(hx), change { $0.color = hx })
+            })
+        }
+        if ["arrow", "line", "rect", "ellipse", "pen", "marker", "callout", "loupe"].contains(t) {
+            sub("Толщина", [2, 4, 6, 10, 16].map { w in
+                item("\(w) px", checked: Int(a.width ?? 4) == w, change { $0.width = CGFloat(w) })
+            })
+        }
+        let sizes: [(String, CGFloat)]? = switch t {
+        case "text", "callout": [("Мелкий", 18), ("Средний", 26), ("Крупный", 40), ("Огромный", 64)]
+        case "step": [("Мелкий", 12), ("Средний", 18), ("Крупный", 28), ("Огромный", 44)]
+        case "loupe": [("Малая", 50), ("Средняя", 80), ("Большая", 130), ("Огромная", 200)]
+        case "blur": [("Слабая", 5), ("Средняя", 12), ("Сильная", 24), ("Очень сильная", 48)]
+        case "pixelate": [("Мелкие пиксели", 8), ("Средние", 16), ("Крупные", 32), ("Очень крупные", 64)]
+        default: nil
+        }
+        if let sizes {
+            let cur = a.size ?? a.defaultSize
+            sub(t == "blur" || t == "pixelate" ? "Сила" : "Размер", sizes.map { name, v in
+                item(name, checked: abs(cur - v) < 0.5, change { $0.size = v })
+            })
+        }
+        if t == "rect" || t == "ellipse" {
+            m.addItem(item("Заливка", checked: a.fill == true, change { $0.fill = $0.fill == true ? nil : true }))
+        }
+        m.addItem(.separator())
+        m.addItem(item("Удалить") { [weak self] in
+            guard let self, i < self.shot.state.anns.count else { return }
+            self.selected = nil
+            self.shot.apply { $0.anns.remove(at: i) }
+        })
+        return m
+    }
+
+    @objc private func runItem(_ sender: NSMenuItem) { (sender.representedObject as? () -> Void)?() }
+
+    private func swatch(_ hx: String) -> NSImage {
+        NSImage(size: NSSize(width: 12, height: 12), flipped: false) { r in
+            color(hx).setFill()
+            NSBezierPath(ovalIn: r.insetBy(dx: 0.5, dy: 0.5)).fill()
+            NSColor.gray.setStroke()
+            NSBezierPath(ovalIn: r.insetBy(dx: 0.5, dy: 0.5)).stroke()
+            return true
+        }
+    }
+
     // MARK: ввод текста
+
+    private func editText(_ i: Int) {
+        let a = shot.state.anns[i]
+        pendingIndex = i
+        beginText(a, at: a.type == "callout" && a.points.count > 1 ? a.points[1] : a.points[0])
+        field?.stringValue = a.text ?? ""
+    }
 
     private func beginText(_ a: Ann, at p: CGPoint) {
         pending = a
         let v = toView(p)
-        let fontSize = max(11, (a.size ?? (14 + (a.width ?? 4) * 3)) * fit.scale)
+        let fontSize = max(11, (a.size ?? a.defaultSize) * fit.scale)
         let f = NSTextField(frame: CGRect(x: v.x, y: v.y, width: 260, height: fontSize + 10))
         f.font = .boldSystemFont(ofSize: fontSize)
         f.textColor = color(a.color)
@@ -539,15 +721,21 @@ final class Canvas: NSView, NSTextFieldDelegate {
 
     func commitText() {
         guard let f = field, var a = pending else { return }
-        field = nil; pending = nil
+        let idx = pendingIndex
+        field = nil; pending = nil; pendingIndex = nil
         let text = f.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         f.removeFromSuperview()
-        if !text.isEmpty { a.text = text; shot.apply { $0.anns.append(a) } }
+        a.text = text
+        if let i = idx, i < shot.state.anns.count {
+            shot.apply { text.isEmpty ? _ = $0.anns.remove(at: i) : ($0.anns[i] = a) }
+        } else if !text.isEmpty {
+            shot.apply { $0.anns.append(a) }
+        }
         window?.makeFirstResponder(self)
     }
 
     func cancelText() {
         field?.removeFromSuperview()
-        field = nil; pending = nil
+        field = nil; pending = nil; pendingIndex = nil
     }
 }

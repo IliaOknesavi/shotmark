@@ -6,7 +6,8 @@ enum Render {
     private static let ci = CIContext()
 
     /// Снимок с разметкой. crop: применить обрезку из состояния.
-    static func image(_ shot: Shot, annotated: Bool = true, crop: Bool = true) -> CGImage {
+    /// skip — индекс аннотации, которую не рисовать (её тянут мышью и рисуют поверх отдельно).
+    static func image(_ shot: Shot, annotated: Bool = true, crop: Bool = true, skip: Int? = nil) -> CGImage {
         let base = shot.base
         let w = base.width, h = base.height
         guard annotated || shot.state.crop != nil else { return base }
@@ -19,7 +20,7 @@ enum Render {
             ctx.scaleBy(x: 1, y: -1)
             NSGraphicsContext.saveGraphicsState()
             NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: true)
-            for a in shot.state.anns { draw(a, in: ctx, base: base) }
+            for (i, a) in shot.state.anns.enumerated() where i != skip { draw(a, in: ctx, base: base) }
             NSGraphicsContext.restoreGraphicsState()
         }
         var out = ctx.makeImage()!
@@ -82,24 +83,23 @@ enum Render {
             ctx.addLines(between: a.points.count > 1 ? a.points : [p0, p0])
             ctx.strokePath()
         case "text":
-            let font = NSFont.boldSystemFont(ofSize: a.size ?? (14 + w * 3))
-            let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: col,
-                                                        .strokeColor: contrast(col), .strokeWidth: -2.5]
-            (a.text ?? "").draw(at: p0, withAttributes: attrs)
+            let font = NSFont.boldSystemFont(ofSize: a.size ?? a.defaultSize)
+            // сначала обводка, потом заливка поверх: у кириллицы в системном шрифте контуры внутри букв
+            // перекрываются, и штрих поверх заливки рисовал бы эти внутренние линии
+            let text = (a.text ?? "") as NSString
+            text.draw(at: p0, withAttributes: [.font: font, .strokeColor: contrast(col), .strokeWidth: 5])
+            text.draw(at: p0, withAttributes: [.font: font, .foregroundColor: col])
         case "callout":
-            let font = NSFont.boldSystemFont(ofSize: a.size ?? (14 + w * 3))
+            let (box, font, pad) = calloutBox(a)
             let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: contrast(col)]
             let text = (a.text ?? "") as NSString
-            let ts = text.size(withAttributes: attrs)
-            let pad = font.pointSize * 0.5
-            let box = CGRect(x: p1.x, y: p1.y, width: ts.width + pad * 2, height: ts.height + pad)
             ctx.move(to: CGPoint(x: box.midX, y: box.midY)); ctx.addLine(to: p0); ctx.strokePath()
             ctx.fillEllipse(in: CGRect(x: p0.x - w, y: p0.y - w, width: w * 2, height: w * 2))
             ctx.addPath(CGPath(roundedRect: box, cornerWidth: pad, cornerHeight: pad, transform: nil))
             ctx.fillPath()
             text.draw(at: CGPoint(x: box.minX + pad, y: box.minY + pad / 2), withAttributes: attrs)
         case "step":
-            let r = a.size ?? max(14, w * 4)
+            let r = a.size ?? a.defaultSize
             ctx.fillEllipse(in: CGRect(x: p0.x - r, y: p0.y - r, width: r * 2, height: r * 2))
             let font = NSFont.boldSystemFont(ofSize: r * 1.1)
             let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: contrast(col)]
@@ -124,7 +124,7 @@ enum Render {
             }
             if let img = ci.createCGImage(out.cropped(to: ciRect), from: ciRect) { drawImage(img, in: r, ctx: ctx) }
         case "loupe":
-            let r = a.size ?? 80
+            let r = a.size ?? a.defaultSize
             let target = a.points.count > 1 ? p1 : p0
             let srcRect = CGRect(x: p0.x - r / 2, y: p0.y - r / 2, width: r, height: r).integral
             let dst = CGRect(x: target.x - r, y: target.y - r, width: r * 2, height: r * 2)
@@ -138,6 +138,39 @@ enum Render {
             ctx.strokeEllipse(in: dst)
         default:
             break
+        }
+    }
+
+    static func calloutBox(_ a: Ann) -> (CGRect, NSFont, CGFloat) {
+        let font = NSFont.boldSystemFont(ofSize: a.size ?? a.defaultSize)
+        let ts = ((a.text ?? "") as NSString).size(withAttributes: [.font: font])
+        let pad = font.pointSize * 0.5
+        let p1 = a.points.count > 1 ? a.points[1] : (a.points.first ?? .zero)
+        return (CGRect(x: p1.x, y: p1.y, width: ts.width + pad * 2, height: ts.height + pad), font, pad)
+    }
+
+    /// Рамка аннотации в пикселях снимка — для выбора мышью и маркеров размера.
+    static func bounds(_ a: Ann) -> CGRect {
+        guard let p0 = a.points.first else { return .zero }
+        let w = max(1, a.width ?? 4)
+        switch a.type {
+        case "text":
+            let font = NSFont.boldSystemFont(ofSize: a.size ?? a.defaultSize)
+            return CGRect(origin: p0, size: ((a.text ?? " ") as NSString).size(withAttributes: [.font: font]))
+        case "callout":
+            return calloutBox(a).0.union(CGRect(x: p0.x - w, y: p0.y - w, width: w * 2, height: w * 2))
+        case "step":
+            let r = a.size ?? a.defaultSize
+            return CGRect(x: p0.x - r, y: p0.y - r, width: r * 2, height: r * 2)
+        case "loupe":
+            let r = a.size ?? a.defaultSize, t = a.points.count > 1 ? a.points[1] : p0
+            return CGRect(x: t.x - r, y: t.y - r, width: r * 2, height: r * 2)
+        case "rect", "ellipse", "blur", "pixelate":
+            return rect(a)
+        default:
+            let xs = a.points.map(\.x), ys = a.points.map(\.y)
+            let k = a.type == "marker" ? w * 2 : w / 2
+            return CGRect(x: xs.min()!, y: ys.min()!, width: xs.max()! - xs.min()!, height: ys.max()! - ys.min()!).insetBy(dx: -k, dy: -k)
         }
     }
 

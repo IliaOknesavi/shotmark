@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 /// Одна аннотация. Координаты — пиксели исходного снимка, начало в левом верхнем углу.
 /// points: line/arrow/rect/ellipse/blur/pixelate — [начало, конец]; pen/marker — ломаная;
 /// text/step — [точка]; callout — [остриё, левый верхний угол плашки]; loupe — [откуда, куда].
-struct Ann: Codable {
+struct Ann: Codable, Equatable {
     var type: String
     var points: [CGPoint]
     var color: String?
