@@ -25,7 +25,6 @@ final class Editor: NSObject, NSWindowDelegate {
     let window: NSWindow
     let canvas: Canvas
     let isOverlay: Bool
-    var waiters: [() -> Void] = []
 
     static let tools: [(id: String, symbol: String, tip: String)] = [
         ("select", "cursorarrow", "Выбор (V): двигать и менять размер; правая кнопка по фигуре — свойства"),
@@ -54,11 +53,6 @@ final class Editor: NSObject, NSWindowDelegate {
         return e
     }
 
-    /// Ждать, пока человек закроет редактор.
-    func waitClose() async {
-        await withCheckedContinuation { c in waiters.append { c.resume() } }
-    }
-
     /// Снимок «в момент»: экраны замирают, на них рисуют и выделяют область. nil — отмена.
     static func captureInPlace(hint: String? = nil) async -> Shot? {
         let frozen = await Capture.freezeAll(includeSelf: true)
@@ -70,6 +64,9 @@ final class Editor: NSObject, NSWindowDelegate {
         let wins = Overlay.windowList()
         let lv = Level()
         levels.append(lv)
+        // обычное приложение (открыт редактор) macOS не пускает поверх полноэкранного пространства —
+        // на время снимка становимся фоновым, после возвращаемся
+        NSApp.setActivationPolicy(.accessory)
         NSApp.activate(ignoringOtherApps: true)
         for s in NSScreen.screens {
             guard let img = frozen[s.displayID] else { continue }
@@ -80,7 +77,7 @@ final class Editor: NSObject, NSWindowDelegate {
         focus(lv)
         await withCheckedContinuation { c in lv.done = { c.resume() } }
         levels.removeAll { $0 === lv }
-        if let below = levels.last { focus(below) }
+        if let below = levels.last { focus(below) } else if !open.isEmpty { NSApp.setActivationPolicy(.regular) }
         return lv.result
     }
 
@@ -310,8 +307,6 @@ final class Editor: NSObject, NSWindowDelegate {
         shot.observers[ObjectIdentifier(self)] = nil
         Editor.open[shot.id] = nil
         if Editor.open.isEmpty { NSApp.setActivationPolicy(.accessory) }
-        waiters.forEach { $0() }
-        waiters.removeAll()
     }
 }
 

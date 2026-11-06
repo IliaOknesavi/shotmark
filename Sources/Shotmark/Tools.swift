@@ -9,6 +9,8 @@ enum Tools {
     Координаты для capture_area и записи — точки экрана (начало в левом верхнем углу главного монитора, как в list_windows).
     Координаты аннотаций и crop — пиксели исходного снимка (на Retina вдвое больше точек), начало слева сверху.
     Картинка в ответах уменьшается до max_size; в тексте ответа указан множитель для пересчёта в пиксели снимка.
+    Всё работает в фоне, человек ничего не видит. Снимки, которые человек сделал и разметил сам (⌘⇧3, ⌘⇧4),
+    лежат в истории: последний — get_image и get_annotations без shot_id.
     """
 
     private static let shotID: [String: Any] = ["type": "string", "description": "id снимка; по умолчанию последний"]
@@ -51,12 +53,8 @@ enum Tools {
                                  "include_self": incSelf, "return_image": retImg, "max_size": maxSize])],
             ["name": "capture_app", "description": "Снять все видимые окна приложения одним кадром.",
              "inputSchema": obj(["app": ["type": "string", "description": "имя или bundle id"], "return_image": retImg, "max_size": maxSize], ["app"])],
-            ["name": "ask_user_capture", "description": "Заморозить экран и попросить человека разметить его и выделить область (как ⌘⇧4). Ждёт, пока он нажмёт «Копировать»; возвращает итоговую картинку и его аннотации.",
-             "inputSchema": obj(["prompt": ["type": "string", "description": "подсказка на панели инструментов"], "max_size": maxSize])],
             ["name": "open_image", "description": "Загрузить картинку из файла как новый снимок (для разметки).",
-             "inputSchema": obj(["path": ["type": "string"], "open_editor": ["type": "boolean"]], ["path"])],
-            ["name": "open_editor", "description": "Открыть снимок в редакторе. wait=true — дождаться закрытия и вернуть результат.",
-             "inputSchema": obj(["shot_id": shotID, "wait": ["type": "boolean"], "max_size": maxSize])],
+             "inputSchema": obj(["path": ["type": "string"]], ["path"])],
             ["name": "annotate", "description": "Добавить аннотации на снимок (одна операция отмены на вызов).",
              "inputSchema": obj(["shot_id": shotID, "annotations": ["type": "array", "items": annSchema],
                                  "return_image": retImg, "max_size": maxSize], ["annotations"])],
@@ -134,26 +132,12 @@ enum Tools {
             guard let app = s("app") else { throw ShotError("нужен app") }
             return result(Store.shared.add(try await Capture.app(app), source: "app \(app)"), a, maxSide)
 
-        case "ask_user_capture":
-            guard let sh = await Editor.captureInPlace(hint: s("prompt")) else { throw ShotError("человек отменил снимок") }
-            return result(sh, a, maxSide, withAnnotations: true)
-
         case "open_image":
+
             guard let p = s("path") else { throw ShotError("нужен path") }
             let url = URL(fileURLWithPath: (p as NSString).expandingTildeInPath)
             guard let img = loadImage(url) else { throw ShotError("не удалось прочитать \(url.path)") }
-            let sh = Store.shared.add(img, source: "file \(url.path)")
-            if b("open_editor", false) { Editor.show(sh) }
-            return [text(describe(sh))]
-
-        case "open_editor":
-            let sh = try shot()
-            let e = Editor.show(sh)
-            if b("wait", false) {
-                await e.waitClose()
-                return result(sh, a, maxSide, withAnnotations: true)
-            }
-            return [text("Редактор открыт: \(sh.id)")]
+            return [text(describe(Store.shared.add(img, source: "file \(url.path)")))]
 
         case "annotate":
             let sh = try shot()
