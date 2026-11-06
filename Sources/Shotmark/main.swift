@@ -23,7 +23,7 @@ enum Actions {
     static func fullScreen() {
         Task {
             do {
-                let sh = Store.shared.add(try await Capture.screen(index: nil), source: "screen")
+                let sh = Store.shared.add(try await Capture.screen(index: nil, includeSelf: true), source: "screen")
                 deliverCapture(sh.base)
             } catch { NSLog("Shotmark: \(error)"); Permissions.explain() }
         }

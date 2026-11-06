@@ -64,8 +64,8 @@ final class Overlay {
     static func windowList() -> [(CGWindowID, CGRect)] {
         let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
         return info.compactMap { d in
+            // окна редактора Shotmark тоже в списке: их можно снять кликом; окна уровней снимка — не обычный слой
             guard (d[kCGWindowLayer as String] as? Int) == 0,
-                  (d[kCGWindowOwnerPID as String] as? Int32) != getpid(),
                   let n = d[kCGWindowNumber as String] as? UInt32,
                   let b = d[kCGWindowBounds as String] as? NSDictionary,
                   let r = CGRect(dictionaryRepresentation: b), r.width > 20, r.height > 20 else { return nil }

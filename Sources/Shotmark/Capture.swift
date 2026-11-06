@@ -43,7 +43,7 @@ enum Capture {
     }
 
     /// Монитор по номеру (0 — главный) или тот, где курсор.
-    static func screen(index: Int?) async throws -> CGImage {
+    static func screen(index: Int?, includeSelf: Bool = false) async throws -> CGImage {
         let c = try await content()
         let d: SCDisplay?
         if let index {
@@ -55,7 +55,7 @@ enum Capture {
             d = c.displays.first { $0.displayID == id } ?? c.displays.first
         }
         guard let d else { throw ShotError("мониторы не найдены") }
-        return try await display(d, in: c)
+        return try await display(d, in: c, includeSelf: includeSelf)
     }
 
     static func area(_ r: CGRect) async throws -> CGImage {
@@ -96,10 +96,11 @@ enum Capture {
     }
 
     /// Кадр каждого монитора (без окон Shotmark) — основа для выделения на замороженном экране.
-    static func freezeAll() async -> [CGDirectDisplayID: CGImage] {
+    /// includeSelf — со своими окнами: снимок уровня снимка или редактора («матрёшка»).
+    static func freezeAll(includeSelf: Bool = false) async -> [CGDirectDisplayID: CGImage] {
         guard let c = try? await content() else { return [:] }
         var out: [CGDirectDisplayID: CGImage] = [:]
-        for d in c.displays { out[d.displayID] = try? await display(d, in: c) }
+        for d in c.displays { out[d.displayID] = try? await display(d, in: c, includeSelf: includeSelf) }
         return out
     }
 

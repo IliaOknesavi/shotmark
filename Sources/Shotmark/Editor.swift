@@ -11,9 +11,15 @@ private final class KeyableWindow: NSWindow {
 @MainActor
 final class Editor: NSObject, NSWindowDelegate {
     static var open: [String: Editor] = [:]
-    private static var overlays: [Editor] = []
-    private static var overlayDone: (() -> Void)?
-    private static var overlayResult: Shot?
+    /// Уровень снимка «поверх экрана»: по окну на монитор. Уровни складываются стопкой —
+    /// ⌘⇧4 внутри уровня снимает экран вместе с ним и открывает следующий.
+    private final class Level {
+        var editors: [Editor] = []
+        var done: (() -> Void)?
+        var result: Shot?
+    }
+    private static var levels: [Level] = []
+    private weak var level: Level?
 
     let shot: Shot
     let window: NSWindow
@@ -55,30 +61,38 @@ final class Editor: NSObject, NSWindowDelegate {
 
     /// Снимок «в момент»: экраны замирают, на них рисуют и выделяют область. nil — отмена.
     static func captureInPlace(hint: String? = nil) async -> Shot? {
-        guard overlays.isEmpty else { return nil }
-        let frozen = await Capture.freezeAll()
+        let frozen = await Capture.freezeAll(includeSelf: true)
         guard !frozen.isEmpty else {
             NSSound.beep()
             Permissions.explain()
             return nil
         }
         let wins = Overlay.windowList()
-        overlayResult = nil
+        let lv = Level()
+        levels.append(lv)
         NSApp.activate(ignoringOtherApps: true)
         for s in NSScreen.screens {
             guard let img = frozen[s.displayID] else { continue }
-            overlays.append(Editor(shot: Store.shared.temp(img, source: "screen"), screen: s, hint: hint, windows: wins))
+            let e = Editor(shot: Store.shared.temp(img, source: "screen"), screen: s, hint: hint, windows: wins)
+            e.level = lv
+            lv.editors.append(e)
         }
+        focus(lv)
+        await withCheckedContinuation { c in lv.done = { c.resume() } }
+        levels.removeAll { $0 === lv }
+        if let below = levels.last { focus(below) }
+        return lv.result
+    }
+
+    private static func focus(_ lv: Level) {
         let mouse = NSEvent.mouseLocation
-        for e in overlays {
+        for e in lv.editors {
             e.window.orderFrontRegardless()
             if let s = e.window.screen, NSMouseInRect(mouse, s.frame, false) {
                 e.window.makeKey()
                 e.window.makeFirstResponder(e.canvas)
             }
         }
-        await withCheckedContinuation { c in overlayDone = { c.resume() } }
-        return overlayResult
     }
 
     init(shot: Shot, screen: NSScreen? = nil, hint: String? = nil, windows: [(CGWindowID, CGRect)] = []) {
@@ -240,7 +254,7 @@ final class Editor: NSObject, NSWindowDelegate {
         window.close()
     }
 
-    @objc func cancelTapped() { Editor.closeOverlays(result: nil) }
+    @objc func cancelTapped() { closeLevel(result: nil) }
 
     @objc func toEditor() {
         canvas.commitText()
@@ -265,27 +279,29 @@ final class Editor: NSObject, NSWindowDelegate {
     /// Esc: сначала гасит ввод текста, потом закрывает.
     func escape() {
         if canvas.isEditingText { canvas.cancelText(); return }
-        if isOverlay { Editor.closeOverlays(result: nil) } else { window.close() }
+        if isOverlay { closeLevel(result: nil) } else { window.close() }
     }
 
     /// Выделения нет — берётся весь монитор.
     private func finishOverlay(copy: Bool = true) {
         Store.shared.persist(shot)
         if copy { deliverCapture(Render.image(shot)) }
-        Editor.closeOverlays(result: shot)
+        closeLevel(result: shot)
     }
 
-    private static func closeOverlays(result: Shot?) {
-        overlayResult = result
-        for e in overlays {
+    /// Закрывает только свой уровень: нижние остаются открытыми.
+    private func closeLevel(result: Shot?) {
+        guard let lv = level else { return }
+        lv.result = result
+        for e in lv.editors {
             e.canvas.cancelText()
             e.shot.observers[ObjectIdentifier(e)] = nil
             e.window.orderOut(nil)
             if e.shot !== result { Store.shared.discard(e.shot) }
         }
-        overlays.removeAll()
-        overlayDone?()
-        overlayDone = nil
+        lv.editors.removeAll()
+        lv.done?()
+        lv.done = nil
     }
 
     func windowWillClose(_ n: Notification) {
